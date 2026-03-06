@@ -23,7 +23,8 @@ import triton.language as tl
 from packaging.version import Version
 
 from liger_kernel.utils import infer_device
-
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+import contextlib
 
 def is_hip() -> bool:
     return torch.version.hip is not None
@@ -150,3 +151,5 @@ def set_large_grf_mode(kernel_args: dict):
     else:
         # API was changed in https://github.com/intel/intel-xpu-backend-for-triton/pull/5430
         kernel_args["grf_mode"] = "large"
+
+

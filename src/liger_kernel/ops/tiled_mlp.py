@@ -64,47 +64,61 @@ class LigerTiledMLPFunction(torch.autograd.Function):
 
         x_requires_grad = x.requires_grad
         x = x.detach()
-        # detach() unsets x.requires_grad, so restore it
         x.requires_grad_(x_requires_grad)
 
-        # x.shape could be [bs, seqlen, hidden_size] or [seqlen, hidden_size] (moe experts)
         hidden_size = x.shape[-1]
         x_shape_orig = x.shape
 
-        # flatten bs+seqlen to avoid having stride issues when narrowing into seqlen w/ bs>1
         x = x.view(-1, hidden_size)
         incoming_grad = grads[0].view(-1, hidden_size)
         x_grad = torch.zeros_like(x)
 
+        # initialize param grad accumulators
+        param_grads = {p: None for p in mlp_module.parameters()}
+
         x_shards = list(torch.chunk(x, chunks=shards, dim=0))
 
         for i, x_shard in enumerate(x_shards):
-            x_shard.requires_grad_(x_requires_grad)
+            x_shard = x_shard.detach().requires_grad_(x_requires_grad)
 
-            # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
-            shard_step = x_shards[i].shape[0]
+            shard_step = x_shard.shape[0]
             shard_offset = i * x_shards[0].shape[0]
-
-            x_shard.grad = x_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
             incoming_grad_shard = incoming_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
 
-            all_outputs = []
-            all_incoming_grads = []
             with torch.enable_grad():
-                all_outputs.append(fn(mlp_module, x_shard))
-                all_incoming_grads.append(
-                incoming_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
-          )
+                output = fn(mlp_module, x_shard)
 
-        # AccumulateGrad fires once here, after all shards are computed
-        torch.autograd.backward(all_outputs, all_incoming_grads)
+                # compute grads locally — never touches .grad, never triggers FSDP hooks
+                inputs = [x_shard] + list(mlp_module.parameters())
+                local_grads = torch.autograd.grad(
+                    outputs=output,
+                    inputs=inputs,
+                    grad_outputs=incoming_grad_shard,
+                )
 
+            # accumulate x grad
+            x_shard_grad = local_grads[0]
+            x_grad.narrow(0, shard_offset, shard_step).copy_(x_shard_grad)
 
+            # accumulate param grads manually
+            for p, g in zip(mlp_module.parameters(), local_grads[1:]):
+                if param_grads[p] is None:
+                    param_grads[p] = g
+                else:
+                    param_grads[p] += g
 
-        # unflatten
+        # write accumulated grads into .grad ONCE — FSDP sees exactly one grad event
+        for p, g in param_grads.items():
+            if p.grad is None:
+                p.grad = g
+            else:
+                p.grad += g
+
         x_grad = x_grad.view(x_shape_orig)
 
         return (None, None, x_grad, None, None)
+
+
 
 
 def apply_tiled_mlp(
