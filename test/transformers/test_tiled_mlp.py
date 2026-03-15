@@ -254,11 +254,12 @@ def _test_fsdp_tiled_mlp(rank, world_size, bs, hidden_size, intermediate_size, n
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 GPUs")
 @pytest.mark.parametrize("world_size", [2])  # expand to [2, 4] if you have 4 GPUs
-@pytest.mark.parametrize("num_shards", [1, 2])
+@pytest.mark.parametrize("num_shards", [1, 2, 4])
 @pytest.mark.parametrize(
     "bs, hidden_size, intermediate_size",
     [
         (2, 256, 512),
+        (2, 512, 1024),
         (1, 128, 256),  # weird shapes
     ],
 )
