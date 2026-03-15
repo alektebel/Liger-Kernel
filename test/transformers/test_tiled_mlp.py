@@ -342,7 +342,7 @@ def _test_fsdp_tiled_swiglu_mlp(
         return mlp
 
     ref_mlp = _make_mlp()
-    fsdp_mlp = FSDP(_make_mlp(), device_id=rank)
+    fsdp_mlp = FSDP(_make_mlp(), device_id=rank, use_orig_params=True)
 
     # Same input on every rank — with identical gradients the FSDP allreduce-mean
     # equals the per-rank value, making direct comparison with ref valid.
