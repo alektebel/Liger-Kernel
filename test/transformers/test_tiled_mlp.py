@@ -200,7 +200,7 @@ def test_tiled_swiglu_correctness(
     torch.testing.assert_close(x1.grad, x2.grad, atol=atol, rtol=rtol, msg="Input gradients don't match")
 
 
-def _test_fsdp_tiled_mlp(rank, world_size, hidden_size, intermediate_size, num_shards, dtype, atol, rtol, file_name):
+def _test_fsdp_tiled_mlp(rank, world_size, bs, hidden_size, intermediate_size, num_shards, dtype, atol, rtol, file_name):
     # Init process group
     torch.distributed.init_process_group(
         backend="nccl",
@@ -230,7 +230,7 @@ def _test_fsdp_tiled_mlp(rank, world_size, hidden_size, intermediate_size, num_s
     # Copy weights from FSDP model (need to gather first or init identically)
 
     # Forward + backward
-    x = torch.randn(2, hidden_size, device=device, dtype=dtype)
+    x = torch.randn(bs, hidden_size, device=device, dtype=dtype)
 
     out = model(x)
     out.sum().backward()
