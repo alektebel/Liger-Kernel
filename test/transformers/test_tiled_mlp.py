@@ -252,7 +252,7 @@ def _test_fsdp_tiled_mlp(rank, world_size, bs, hidden_size, intermediate_size, n
     torch.testing.assert_close(out, ref_out, atol=atol, rtol=rtol)
     # Assert gradient correctness
 
-    with FSDP.summon_full_params(model, with_grads=True):
+    with FSDP.summon_full_params(model, use_orig_params=True):
         for p1, p2 in zip(model.parameters(), ref_model.parameters()):
             torch.testing.assert_close(p1.grad, p2.grad, atol=atol, rtol=rtol, msg="Gradient mismatch")
 
