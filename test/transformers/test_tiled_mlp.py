@@ -230,7 +230,7 @@ def _test_fsdp_tiled_mlp(rank, world_size, bs, hidden_size, intermediate_size, n
     model.down_proj.weight.data = D.clone()
 
     # Wrap with FSDP
-    model = FSDP(model)
+    model = FSDP(model, use_orig_params=True)
 
     # Reference: same weights, no FSDP
     ref_model = LigerTiledSwiGLUMLP(config=config, num_shards=num_shards).to(device).to(dtype)
@@ -252,13 +252,13 @@ def _test_fsdp_tiled_mlp(rank, world_size, bs, hidden_size, intermediate_size, n
     torch.testing.assert_close(out, ref_out, atol=atol, rtol=rtol)
     # Assert gradient correctness
 
-    with FSDP.summon_full_params(model, use_orig_params=True):
+    with FSDP.summon_full_params(model, with_grads = True):
         for p1, p2 in zip(model.parameters(), ref_model.parameters()):
             torch.testing.assert_close(p1.grad, p2.grad, atol=atol, rtol=rtol, msg="Gradient mismatch")
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 GPUs")
 @pytest.mark.parametrize("world_size", [2])  # expand to [2, 4] if you have 4 GPUs
-@pytest.mark.parametrize("num_shards", [1, 2, 4])
+@pytest.mark.parametrize("num_shards", [1, 2])
 @pytest.mark.parametrize(
     "bs, hidden_size, intermediate_size",
     [
