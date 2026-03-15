@@ -195,3 +195,80 @@ def test_tiled_swiglu_correctness(
         )
 
     torch.testing.assert_close(x1.grad, x2.grad, atol=atol, rtol=rtol, msg="Input gradients don't match")
+
+
+def _test_fsdp_tiled_mlp(rank, world_size, hidden_size, intermediate_size, num_shards, dtype, atol, rtol, file_name):
+    # Init process group
+    torch.distributed.init_process_group(
+        backend="nccl",
+        init_method=f"file://{file_name}",
+        rank=rank,
+        world_size=world_size,
+    )
+    torch.cuda.set_device(rank)
+    device = f"cuda:{rank}"
+
+    # Build model — use LigerTiledSwiGLUMLP directly, not nn.Sequential
+    from liger_kernel.transformers.tiled_mlp import LigerTiledSwiGLUMLP
+
+
+    config = LlamaConfig(
+             hidden_size=hidden_size,
+             intermediate_size=intermediate_size,
+         )
+    model = LigerTiledSwiGLUMLP(config=config, num_shards=num_shards).to(device).to(dtype)
+
+    # Wrap with FSDP
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    model = FSDP(model)
+
+    # Reference: same weights, no FSDP
+    ref_model = LigerTiledSwiGLUMLP(config=config, num_shards=num_shards).to(device).to(dtype)
+    # Copy weights from FSDP model (need to gather first or init identically)
+
+    # Forward + backward
+    x = torch.randn(2, hidden_size, device=device, dtype=dtype)
+
+    out = model(x)
+    out.sum().backward()
+
+    ref_out = ref_model(x)
+    ref_out.sum().backward()
+
+    # Assert
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=rtol)
+    # Assert gradient correctness
+
+    torch.distributed.destroy_process_group()
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 GPUs")
+@pytest.mark.parametrize("world_size", [2])  # expand to [2, 4] if you have 4 GPUs
+@pytest.mark.parametrize("num_shards", [1, 2, 4])
+@pytest.mark.parametrize(
+    "bs, hidden_size, intermediate_size",
+    [
+        (2, 256, 512),
+        (4, 512, 1024),
+        (1, 127, 256),  # weird shapes
+    ],
+)
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float32, 1e-5, 1e-5),
+        pytest.param(
+            torch.bfloat16,
+            1e-1,
+            1e-1,
+            marks=pytest.mark.skipif(not supports_bfloat16(), reason="bfloat16 not supported"),
+        ),
+    ],
+)
+def test_fsdp_tiled_swiglu(world_size, num_shards, bs, hidden_size, intermediate_size, dtype, atol, rtol):
+    with tempfile.NamedTemporaryFile() as f:
+        mp.spawn(
+            _test_fsdp_tiled_mlp,
+            args=(world_size, bs, hidden_size, intermediate_size, num_shards, dtype, atol, rtol, f.name),
+            nprocs=world_size,
+            join=True,
+        )
