@@ -9,7 +9,10 @@ from liger_kernel.transformers.swiglu import LigerSwiGLUMLP
 from liger_kernel.transformers.tiled_mlp import LigerTiledGEGLUMLP
 from liger_kernel.transformers.tiled_mlp import LigerTiledSwiGLUMLP
 from liger_kernel.utils import infer_device
+
 import tempfile
+import torch.multiprocessing as mp
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 device = infer_device()
 
 
