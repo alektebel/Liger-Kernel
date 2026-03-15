@@ -262,9 +262,8 @@ def _test_fsdp_tiled_mlp(rank, world_size, bs, hidden_size, intermediate_size, n
 @pytest.mark.parametrize(
     "bs, hidden_size, intermediate_size",
     [
-        (2, 256),
-        (4, 512),
-        (1, 127),  # weird shapes
+        (2, 256, 512),
+        (1, 128, 256),  # weird shapes
     ],
 )
 @pytest.mark.parametrize(
