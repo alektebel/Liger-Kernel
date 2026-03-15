@@ -240,7 +240,7 @@ def _test_fsdp_tiled_mlp(rank, world_size, bs, hidden_size, intermediate_size, n
     ref_model.down_proj.weight.data = D.clone()
 
     # Forward + backward
-    x = torch.randn(bs, hidden_size, device=device, dtype=dtype).requires_grad(True)
+    x = torch.randn(bs, hidden_size, device=device, dtype=dtype).requires_grad_(True)
 
     out = model(x)
     out.sum().backward()
