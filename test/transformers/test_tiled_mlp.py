@@ -212,6 +212,8 @@ def test_tiled_swiglu_correctness(
 def _test_dtensor_tiled_swiglu_mlp(
     rank, world_size, bsz, seq_len, hidden_size, intermediate_size, dtype, atol, rtol, num_shards, file_name
 ):
+    if torch.cuda.is_available():
+        torch.cuda.set_device(rank)
     torch.distributed.init_process_group(
         backend=infer_comm_backend(),
         init_method=f"file://{file_name}",
@@ -312,6 +314,8 @@ def test_dtensor_tiled_swiglu_mlp(world_size, bsz, seq_len, hidden_size, interme
 def _test_fsdp_tiled_swiglu_mlp(
     rank, world_size, bsz, seq_len, hidden_size, intermediate_size, dtype, atol, rtol, num_shards, file_name
 ):
+    if torch.cuda.is_available():
+        torch.cuda.set_device(rank)
     torch.distributed.init_process_group(
         backend=infer_comm_backend(),
         init_method=f"file://{file_name}",
@@ -336,7 +340,7 @@ def _test_fsdp_tiled_swiglu_mlp(
         return mlp
 
     ref_mlp = _make_mlp()
-    fsdp_mlp = FSDP(_make_mlp())
+    fsdp_mlp = FSDP(_make_mlp(), device_id=rank)
 
     # Same input on every rank — with identical gradients the FSDP allreduce-mean
     # equals the per-rank value, making direct comparison with ref valid.
