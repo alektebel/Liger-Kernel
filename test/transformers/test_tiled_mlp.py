@@ -1,5 +1,9 @@
+import tempfile
+
 import pytest
 import torch
+import torch.multiprocessing as mp
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from test.utils import supports_bfloat16
 from transformers.models.llama.configuration_llama import LlamaConfig
@@ -8,6 +12,7 @@ from liger_kernel.transformers.geglu import LigerGEGLUMLP
 from liger_kernel.transformers.swiglu import LigerSwiGLUMLP
 from liger_kernel.transformers.tiled_mlp import LigerTiledGEGLUMLP
 from liger_kernel.transformers.tiled_mlp import LigerTiledSwiGLUMLP
+from liger_kernel.utils import infer_comm_backend
 from liger_kernel.utils import infer_device
 
 device = infer_device()
@@ -195,3 +200,194 @@ def test_tiled_swiglu_correctness(
         )
 
     torch.testing.assert_close(x1.grad, x2.grad, atol=atol, rtol=rtol, msg="Input gradients don't match")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DTensor (sequence-parallel) test
+# Verifies that LigerTiledSwiGLUMLP produces identical results when the input
+# is a DTensor sharded along the sequence dimension vs. a plain tensor.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _test_dtensor_tiled_swiglu_mlp(
+    rank, world_size, bsz, seq_len, hidden_size, intermediate_size, dtype, atol, rtol, num_shards, file_name
+):
+    torch.distributed.init_process_group(
+        backend=infer_comm_backend(),
+        init_method=f"file://{file_name}",
+        rank=rank,
+        world_size=world_size,
+    )
+    device = f"{infer_device()}:{rank}" if infer_device() != "cpu" else "cpu"
+    device_mesh = torch.distributed.device_mesh.init_device_mesh(
+        infer_device(), mesh_shape=(world_size,), mesh_dim_names=("tp",)
+    )
+
+    config = LlamaConfig(hidden_size=hidden_size, intermediate_size=intermediate_size, hidden_act="silu")
+
+    # Deterministic weight initialisation — same on every rank
+    torch.manual_seed(42)
+    G = torch.randn(intermediate_size, hidden_size, device=device, dtype=dtype)
+    U = torch.randn(intermediate_size, hidden_size, device=device, dtype=dtype)
+    D = torch.randn(hidden_size, intermediate_size, device=device, dtype=dtype)
+
+    torch.manual_seed(7)
+    _input = torch.randn(bsz, seq_len, hidden_size, device=device, dtype=dtype) * 0.1
+
+    # Shard input along the sequence dimension (dim=1)
+    dt = torch.distributed.tensor.distribute_tensor(
+        _input,
+        device_mesh=device_mesh,
+        placements=[torch.distributed.tensor.Shard(1)],
+    )
+
+    def _make_mlp():
+        mlp = LigerTiledSwiGLUMLP(config=config, num_shards=num_shards).to(device).to(dtype)
+        mlp.gate_proj.weight.data = G.clone()
+        mlp.up_proj.weight.data = U.clone()
+        mlp.down_proj.weight.data = D.clone()
+        return mlp
+
+    tiled_mlp_dist = _make_mlp()
+    tiled_mlp_ref = _make_mlp()
+
+    x_dist = dt.requires_grad_(True)
+    x_ref = _input.detach().clone().requires_grad_(True)
+
+    y_dist = tiled_mlp_dist(x_dist)
+    y_ref = tiled_mlp_ref(x_ref)
+    torch.testing.assert_close(y_dist, y_ref, atol=atol, rtol=rtol)
+
+    dy = torch.randn_like(y_ref)
+    ddy = torch.distributed.tensor.distribute_tensor(
+        dy, device_mesh=device_mesh, placements=[torch.distributed.tensor.Shard(1)]
+    )
+    y_dist.backward(ddy)
+    y_ref.backward(dy)
+
+    torch.testing.assert_close(x_dist.grad, x_ref.grad, atol=atol, rtol=rtol)
+    for p_dist, p_ref in zip(tiled_mlp_dist.parameters(), tiled_mlp_ref.parameters()):
+        torch.testing.assert_close(p_dist.grad, p_ref.grad, atol=atol, rtol=rtol)
+
+    torch.distributed.destroy_process_group()
+
+
+@pytest.mark.xfail(
+    torch.cuda.device_count() < 2,
+    reason="Pending multi-GPU host support. This test is expected to pass when run with multi-GPU host.",
+)
+@pytest.mark.parametrize(
+    "world_size, bsz, seq_len, hidden_size, intermediate_size",
+    [
+        (2, 2, 16, 64, 128),
+        (2, 1, 32, 32, 64),
+    ],
+)
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float32, 1e-4, 1e-6),
+        (torch.bfloat16, 2e-1, 2e-2),
+    ],
+)
+@pytest.mark.parametrize("num_shards", [None, 2, 4])
+def test_dtensor_tiled_swiglu_mlp(world_size, bsz, seq_len, hidden_size, intermediate_size, dtype, atol, rtol, num_shards):
+    with tempfile.NamedTemporaryFile() as f:
+        mp.spawn(
+            _test_dtensor_tiled_swiglu_mlp,
+            args=(world_size, bsz, seq_len, hidden_size, intermediate_size, dtype, atol, rtol, num_shards, f.name),
+            nprocs=world_size,
+            join=True,
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FSDP test
+# Verifies that LigerTiledSwiGLUMLP forward+backward work correctly under FSDP1
+# wrapping — the key regression from the FSDP backward fix (using
+# torch.autograd.grad() instead of torch.autograd.backward() per shard).
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _test_fsdp_tiled_swiglu_mlp(
+    rank, world_size, bsz, seq_len, hidden_size, intermediate_size, dtype, atol, rtol, num_shards, file_name
+):
+    torch.distributed.init_process_group(
+        backend=infer_comm_backend(),
+        init_method=f"file://{file_name}",
+        rank=rank,
+        world_size=world_size,
+    )
+    device = f"{infer_device()}:{rank}" if infer_device() != "cpu" else "cpu"
+
+    config = LlamaConfig(hidden_size=hidden_size, intermediate_size=intermediate_size, hidden_act="silu")
+
+    # Same weight initialisation on every rank so FSDP and reference start identically
+    torch.manual_seed(42)
+    G = torch.randn(intermediate_size, hidden_size, device=device, dtype=dtype)
+    U = torch.randn(intermediate_size, hidden_size, device=device, dtype=dtype)
+    D = torch.randn(hidden_size, intermediate_size, device=device, dtype=dtype)
+
+    def _make_mlp():
+        mlp = LigerTiledSwiGLUMLP(config=config, num_shards=num_shards).to(device).to(dtype)
+        mlp.gate_proj.weight.data = G.clone()
+        mlp.up_proj.weight.data = U.clone()
+        mlp.down_proj.weight.data = D.clone()
+        return mlp
+
+    ref_mlp = _make_mlp()
+    fsdp_mlp = FSDP(_make_mlp())
+
+    # Same input on every rank — with identical gradients the FSDP allreduce-mean
+    # equals the per-rank value, making direct comparison with ref valid.
+    torch.manual_seed(7)
+    _input = torch.randn(bsz, seq_len, hidden_size, device=device, dtype=dtype) * 0.1
+    x_ref = _input.detach().clone().requires_grad_(True)
+    x_fsdp = _input.detach().clone().requires_grad_(True)
+
+    y_ref = ref_mlp(x_ref)
+    y_fsdp = fsdp_mlp(x_fsdp)
+    torch.testing.assert_close(y_ref, y_fsdp, atol=atol, rtol=rtol)
+
+    dy = torch.randn_like(y_ref)
+    y_ref.backward(dy.clone())
+    y_fsdp.backward(dy.clone())
+
+    # Input gradients are not sharded by FSDP — compare directly
+    torch.testing.assert_close(x_ref.grad, x_fsdp.grad, atol=atol, rtol=rtol)
+
+    # Gather sharded parameter gradients for comparison
+    with FSDP.summon_full_params(fsdp_mlp, with_grads=True, rank0_only=False):
+        for p_ref, p_fsdp in zip(ref_mlp.parameters(), fsdp_mlp.parameters()):
+            torch.testing.assert_close(p_ref.grad, p_fsdp.grad, atol=atol, rtol=rtol)
+
+    torch.distributed.destroy_process_group()
+
+
+@pytest.mark.xfail(
+    torch.cuda.device_count() < 2,
+    reason="Pending multi-GPU host support. This test is expected to pass when run with multi-GPU host.",
+)
+@pytest.mark.parametrize(
+    "world_size, bsz, seq_len, hidden_size, intermediate_size",
+    [
+        (2, 2, 16, 64, 128),
+        (2, 1, 32, 32, 64),
+    ],
+)
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float32, 1e-4, 1e-6),
+        (torch.bfloat16, 2e-1, 2e-2),
+    ],
+)
+@pytest.mark.parametrize("num_shards", [None, 2, 4])
+def test_fsdp_tiled_swiglu_mlp(world_size, bsz, seq_len, hidden_size, intermediate_size, dtype, atol, rtol, num_shards):
+    with tempfile.NamedTemporaryFile() as f:
+        mp.spawn(
+            _test_fsdp_tiled_swiglu_mlp,
+            args=(world_size, bsz, seq_len, hidden_size, intermediate_size, dtype, atol, rtol, num_shards, f.name),
+            nprocs=world_size,
+            join=True,
+        )
