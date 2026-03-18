@@ -539,6 +539,7 @@ def test_fsdp_tiled_vs_torch_swiglu(world_size, num_shards, bs, hidden_size, int
         )
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 GPUs")
 @pytest.mark.parametrize(
     "dtype, atol, rtol",
     [
