@@ -45,7 +45,8 @@ class LigerTiledMLPFunction(torch.autograd.Function):
         ctx.mlp_module = mlp_module
         ctx.shards = shards
         ctx.num_params = len(params)
-        ctx.save_for_backward(x, *params)
+        ctx.params = params  # Store params as tuple, don't save (they're in mlp_module)
+        ctx.save_for_backward(x)  # Only save input tensor
 
         # x.shape could be [bs, seqlen, hidden_size] or [seqlen, hidden_size] (moe experts)
         x_shards = list(torch.chunk(x, chunks=shards, dim=-2))
@@ -59,9 +60,8 @@ class LigerTiledMLPFunction(torch.autograd.Function):
     @ensure_contiguous
     def backward(ctx, *grads) -> tuple:
         fn = ctx.fn
-        saved_tensors = ctx.saved_tensors
-        x = saved_tensors[0]
-        params = saved_tensors[1:]
+        x = ctx.saved_tensors[0]  # Only x was saved
+        params = ctx.params  # Get params from context (not saved_tensors)
         mlp_module = ctx.mlp_module
         shards = ctx.shards
 
@@ -79,11 +79,8 @@ class LigerTiledMLPFunction(torch.autograd.Function):
         incoming_grad = grads[0].view(-1, hidden_size)
         x_grad = torch.zeros_like(x) if x_requires_grad else None
 
-        # Initialize param grad accumulators as a list to maintain order
-        # Use None for params that don't require grad to maintain proper indexing
-        param_grads: List[Optional[torch.Tensor]] = [
-            None if not p.requires_grad else torch.zeros_like(p) for p in params
-        ]
+        # Initialize param grad accumulators as None for lazy allocation
+        param_grads: List[Optional[torch.Tensor]] = [None for _ in params]
 
         x_shards = list(torch.chunk(x, chunks=shards, dim=0))
 
@@ -104,6 +101,8 @@ class LigerTiledMLPFunction(torch.autograd.Function):
             with torch.enable_grad():
                 output = fn(mlp_module, x_shard)
                 if inputs:
+                    # Use torch.autograd.grad for FSDP compatibility
+                    # FSDP needs explicit gradient returns to manage sharded parameters
                     local_grads = torch.autograd.grad(
                         outputs=output,
                         inputs=inputs,
@@ -118,29 +117,41 @@ class LigerTiledMLPFunction(torch.autograd.Function):
                 x_grad.narrow(0, shard_offset, shard_step).copy_(local_grads[grad_idx])
                 grad_idx += 1
 
-            # Accumulate parameter gradients
+            # Accumulate parameter gradients using in-place operations
             for param_idx, p in enumerate(params):
                 if p.requires_grad:
                     grad = local_grads[grad_idx]
                     if param_grads[param_idx] is None:
+                        # First shard: clone to avoid keeping local_grads alive
                         param_grads[param_idx] = grad.clone()
                     else:
-                        # Type checker needs to know param_grads[param_idx] is not None here
+                        # Subsequent shards: accumulate in-place
                         existing_grad = param_grads[param_idx]
-                        assert existing_grad is not None  # for type checker
-                        param_grads[param_idx] = existing_grad + grad
+                        assert existing_grad is not None
+                        # Use add_ for true in-place accumulation
+                        existing_grad.add_(grad)
                     grad_idx += 1
 
             # Update offset for next shard
             shard_offset += shard_step
+
+            # CRITICAL: Explicitly delete local_grads to free memory immediately
+            # Without this, the gradient tensors stay alive until loop completion
+            del local_grads
 
         # unflatten x_grad if needed
         if x_grad is not None:
             x_grad = x_grad.view(x_shape_orig)
 
         # Return gradients: (fn, mlp_module, x, shards, *params)
-        # Convert None values to actual zero tensors for params that don't require grad
-        final_param_grads = [g if g is not None else torch.zeros_like(p) for g, p in zip(param_grads, params)]
+        # Clone param_grads to ensure they're not views into local_grads
+        final_param_grads = []
+        for param_idx, p in enumerate(params):
+            if param_grads[param_idx] is not None:
+                final_param_grads.append(param_grads[param_idx].clone())
+            else:
+                final_param_grads.append(torch.zeros_like(p))
+
         return (None, None, x_grad, None, *final_param_grads)
 
 
