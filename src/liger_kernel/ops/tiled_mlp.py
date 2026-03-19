@@ -87,13 +87,14 @@ class LigerTiledMLPFunction(torch.autograd.Function):
 
         x_shards = list(torch.chunk(x, chunks=shards, dim=0))
 
+        # Calculate cumulative offsets for correct gradient slicing when shards are uneven
+        shard_offset = 0
         for i, x_shard in enumerate(x_shards):
             x_shard = x_shard.detach()
             x_shard.requires_grad_(x_requires_grad)
 
             # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
             shard_step = x_shards[i].shape[0]
-            shard_offset = i * x_shards[0].shape[0]
             incoming_grad_shard = incoming_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
 
             # Build inputs list: x_shard + params that require grad
@@ -129,6 +130,9 @@ class LigerTiledMLPFunction(torch.autograd.Function):
                         assert existing_grad is not None  # for type checker
                         param_grads[param_idx] = existing_grad + grad
                     grad_idx += 1
+
+            # Update offset for next shard
+            shard_offset += shard_step
 
         # unflatten x_grad if needed
         if x_grad is not None:

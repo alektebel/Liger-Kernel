@@ -540,29 +540,6 @@ def test_fsdp_tiled_vs_torch_swiglu(world_size, num_shards, bs, hidden_size, int
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 GPUs")
-@pytest.mark.parametrize(
-    "dtype, atol, rtol",
-    [
-        (torch.float32, 1e-5, 1e-5),
-        pytest.param(
-            torch.bfloat16,
-            1e-1,
-            1e-1,
-            marks=pytest.mark.skipif(not supports_bfloat16(), reason="bfloat16 not supported"),
-        ),
-    ],
-)
-def test_fsdp_tiled_swiglu(world_size, num_shards, bs, hidden_size, intermediate_size, dtype, atol, rtol):
-    with tempfile.NamedTemporaryFile() as f:
-        mp.spawn(
-            _test_fsdp_tiled_mlp,
-            args=(world_size, bs, hidden_size, intermediate_size, num_shards, dtype, atol, rtol, f.name),
-            nprocs=world_size,
-            join=True,
-        )
-
-
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 GPUs")
 @pytest.mark.parametrize("world_size", [ws for ws in [2, 4, 8] if ws <= torch.cuda.device_count()])
 @pytest.mark.parametrize("num_shards", [1, 2, 4])
 @pytest.mark.parametrize(
@@ -657,12 +634,12 @@ def _test_fsdp_tiled_geglu_mlp(
     ref_out.sum().backward()
 
     # Assert forward outputs match
-    torch.testing.assert_close(out, ref_out, atol=atol, rtol=rtol,
-                               msg=f"Rank {rank}: Forward outputs don't match")
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=rtol, msg=f"Rank {rank}: Forward outputs don't match")
 
     # Assert input gradients match
-    torch.testing.assert_close(x_fsdp.grad, x_ref.grad, atol=atol, rtol=rtol,
-                               msg=f"Rank {rank}: Input gradients don't match")
+    torch.testing.assert_close(
+        x_fsdp.grad, x_ref.grad, atol=atol, rtol=rtol, msg=f"Rank {rank}: Input gradients don't match"
+    )
 
     # Assert parameter gradients match (after FSDP reduces them)
     fsdp_params = list(model.parameters())
