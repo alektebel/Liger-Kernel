@@ -269,18 +269,20 @@ def _test_fsdp_tiled_mlp(
     )
 
     # Assert parameter gradients match (after FSDP reduces them)
-    fsdp_params = list(model.parameters())
-    ref_params = list(ref_model.parameters())
+    # Need to use summon_full_params to gather sharded gradients across ranks
+    with FSDP.summon_full_params(model, with_grads=True):
+        fsdp_params = list(model.parameters())
+        ref_params = list(ref_model.parameters())
 
-    for i, (p_fsdp, p_ref) in enumerate(zip(fsdp_params, ref_params)):
-        if p_fsdp.grad is not None and p_ref.grad is not None:
-            torch.testing.assert_close(
-                p_fsdp.grad,
-                p_ref.grad,
-                atol=atol,
-                rtol=rtol,
-                msg=f"Rank {rank}: Parameter {i} gradients don't match",
-            )
+        for i, (p_fsdp, p_ref) in enumerate(zip(fsdp_params, ref_params)):
+            if p_fsdp.grad is not None and p_ref.grad is not None:
+                torch.testing.assert_close(
+                    p_fsdp.grad,
+                    p_ref.grad,
+                    atol=atol,
+                    rtol=rtol,
+                    msg=f"Rank {rank}: Parameter {i} gradients don't match",
+                )
 
     torch.distributed.destroy_process_group()
 
@@ -364,18 +366,20 @@ def _test_fsdp_tiled_vs_torch_mlp(
     )
 
     # Compare parameter gradients (after FSDP reduces them)
-    tiled_params = list(tiled_model.parameters())
-    torch_params = list(torch_model.parameters())
+    # Need to use summon_full_params to gather sharded gradients across ranks
+    with FSDP.summon_full_params(tiled_model, with_grads=True), FSDP.summon_full_params(torch_model, with_grads=True):
+        tiled_params = list(tiled_model.parameters())
+        torch_params = list(torch_model.parameters())
 
-    for i, (p_tiled, p_torch) in enumerate(zip(tiled_params, torch_params)):
-        if p_tiled.grad is not None and p_torch.grad is not None:
-            torch.testing.assert_close(
-                p_tiled.grad,
-                p_torch.grad,
-                atol=atol,
-                rtol=rtol,
-                msg=f"Rank {rank}: Parameter {i} gradients don't match",
-            )
+        for i, (p_tiled, p_torch) in enumerate(zip(tiled_params, torch_params)):
+            if p_tiled.grad is not None and p_torch.grad is not None:
+                torch.testing.assert_close(
+                    p_tiled.grad,
+                    p_torch.grad,
+                    atol=atol,
+                    rtol=rtol,
+                    msg=f"Rank {rank}: Parameter {i} gradients don't match",
+                )
 
     torch.distributed.destroy_process_group()
 
@@ -459,18 +463,20 @@ def _test_fsdp_tiled_vs_torch_geglu_mlp(
     )
 
     # Compare parameter gradients (after FSDP reduces them)
-    tiled_params = list(tiled_model.parameters())
-    torch_params = list(torch_model.parameters())
+    # Need to use summon_full_params to gather sharded gradients across ranks
+    with FSDP.summon_full_params(tiled_model, with_grads=True), FSDP.summon_full_params(torch_model, with_grads=True):
+        tiled_params = list(tiled_model.parameters())
+        torch_params = list(torch_model.parameters())
 
-    for i, (p_tiled, p_torch) in enumerate(zip(tiled_params, torch_params)):
-        if p_tiled.grad is not None and p_torch.grad is not None:
-            torch.testing.assert_close(
-                p_tiled.grad,
-                p_torch.grad,
-                atol=atol,
-                rtol=rtol,
-                msg=f"Rank {rank}: Parameter {i} gradients don't match",
-            )
+        for i, (p_tiled, p_torch) in enumerate(zip(tiled_params, torch_params)):
+            if p_tiled.grad is not None and p_torch.grad is not None:
+                torch.testing.assert_close(
+                    p_tiled.grad,
+                    p_torch.grad,
+                    atol=atol,
+                    rtol=rtol,
+                    msg=f"Rank {rank}: Parameter {i} gradients don't match",
+                )
 
     torch.distributed.destroy_process_group()
 
@@ -642,18 +648,20 @@ def _test_fsdp_tiled_geglu_mlp(
     )
 
     # Assert parameter gradients match (after FSDP reduces them)
-    fsdp_params = list(model.parameters())
-    ref_params = list(ref_model.parameters())
+    # Need to use summon_full_params to gather sharded gradients across ranks
+    with FSDP.summon_full_params(model, with_grads=True):
+        fsdp_params = list(model.parameters())
+        ref_params = list(ref_model.parameters())
 
-    for i, (p_fsdp, p_ref) in enumerate(zip(fsdp_params, ref_params)):
-        if p_fsdp.grad is not None and p_ref.grad is not None:
-            torch.testing.assert_close(
-                p_fsdp.grad,
-                p_ref.grad,
-                atol=atol,
-                rtol=rtol,
-                msg=f"Rank {rank}: Parameter {i} gradients don't match",
-            )
+        for i, (p_fsdp, p_ref) in enumerate(zip(fsdp_params, ref_params)):
+            if p_fsdp.grad is not None and p_ref.grad is not None:
+                torch.testing.assert_close(
+                    p_fsdp.grad,
+                    p_ref.grad,
+                    atol=atol,
+                    rtol=rtol,
+                    msg=f"Rank {rank}: Parameter {i} gradients don't match",
+                )
 
     torch.distributed.destroy_process_group()
 
